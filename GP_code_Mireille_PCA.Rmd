@@ -1,0 +1,423 @@
+---
+title: "Team 3: PCA"
+author: "Mireille Nkamsi"
+date: "11/08/2019"
+output:
+  pdf_document: default
+  word_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+Notes: 
+  - You do not have to put all of your team members' code into a single file. I have included all 5 analyses just for your information. You only need the code for your analysis.
+  - The tasks include both coding and written interpretation. 
+  - Please knit to word document -- it will make it easier to combine your results with your team members in to the single manuscript (submitted in GP4).
+
+## Setup
+
+### Load packages
+
+```{r setup, include=FALSE}
+### Global knitr options
+knitr::opts_chunk$set(echo = TRUE)
+
+### Load packages/libraries that we will need
+library(tidyverse)
+library(viridis)       # Better plot colors
+library(ggbiplot)      # PCA plot
+library(corrr)         # Correlations
+```
+
+### Custom ggplot theme
+
+```{r theme}
+### DON'T EDIT CODE IN THIS CHUNK
+
+theme_custom <- theme_bw() +
+  
+  # if we have a plot title or subtitle, let's center it
+  theme (
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  ) 
+theme_set(theme_custom)
+
+### We'll make the viridis color scale our default plotting color palette
+scale_colour_continuous <- function(...) {
+  scale_colour_viridis_c(...)
+}
+scale_fill_continuous <- function(...) {
+  scale_fill_viridis_c(...)
+}
+scale_colour_discrete <- function(...) {
+  scale_colour_viridis_d(..., begin = 0, end = 0.9)
+}
+scale_fill_discrete <- function(...) {
+  scale_fill_viridis_d(..., begin = 0, end = 0.9)
+}
+```
+
+### Setwd fix (if needed)
+
+If you are having trouble loading the exprs_tidy file below, manually override the working directory. To do this
+  1. In the menu bar, click: Session > Set Working Directory > To Source File Location
+  2. Copy the line of code in the console, and paste it into the code chunk below
+  
+```{r fix_setwd}
+### EDIT if necessary
+
+```
+
+### FYI: how I got the data
+
+```{r get_data, eval=FALSE}
+### Get list of available datasets
+### https://www.bioconductor.org/packages/3.3/bioc/vignettes/TCGAbiolinks/inst/doc/tcgaBiolinks.html#harmonized-data-1
+View(getGDCprojects())
+
+### Datasets to use for group project (I picked the ones with smallest sample size and no sex bias)
+projects <- c(
+  "TCGA-ACC",
+  "TCGA-CHOL", 
+  "TCGA-DLBC", 
+  "TCGA-KICH", 
+  "TCGA-MESO", 
+  "TCGA-UVM"
+)
+
+phenoList <-  vector(mode = "list", length = length(projects))
+names(phenoList) <- projects
+exprsList <-  vector(mode = "list", length = length(projects))
+names(exprsList) <- projects
+for (i in projects) { 
+  ### Get data (in summarized experiment ["se"]  format)
+  query <- GDCquery(
+    project = i, 
+    data.category = "Transcriptome Profiling", 
+    data.type = "Gene Expression Quantification", 
+    workflow.type = "HTSeq - FPKM"
+  )
+  GDCdownload(query)
+  se <- GDCprepare(query)
+  
+  ### Extract phenoData and remove columns that either are all different or all consistent
+  pheno_full <- as.data.frame(colData(se))
+  pheno <- janitor::remove_constant(pheno_full)
+  
+  ### Extract exprs matrix and remove lowly expressed
+  exprs_full <- assay(se)
+  keep <- rowSums(exprs_full > 1) >= 10
+  exprs <- exprs_full[keep, ]
+
+  ### Shorten the sample id
+  rownames(pheno) <- abbreviate(gsub("TCGA-OR-", "", rownames(pheno)), method = "both")
+  pheno$id <- rownames(pheno)
+  colnames(exprs) <- abbreviate(gsub("TCGA-OR-", "", colnames(exprs)), method = "both")
+  
+  ### Remove extra columns (not groups)
+  pheno$sample <- pheno$id
+  pheno$id <- NULL
+  remove_cols <- c(
+    "patient", "updated_datetime", "updated_datetime.x", "updated_datetime.y", 
+    "barcode", "diagnosis_id", "demographic_id", "exposure_id", "bcr_patient_barcode", 
+    "morphology", "treatments", 
+    "days_to_birth", "days_to_last_follow_up", "days_to_death",
+    "year_of_birth", "year_of_diagnosis", "year_of_death"
+  )
+  pheno <- pheno[ , !(colnames(pheno) %in% remove_cols)]
+  pheno <- pheno[ , !(colnames(pheno) %in% colnames(pheno)[grep("_CHOL_del|_CHOL_amp|subtype_", colnames(pheno))])]
+
+  ### Save
+  saveRDS(exprs, paste0(i, "_exprs.rds"))
+  saveRDS(pheno, paste0(i, "_pheno.rds"))
+  
+  ### Add to list
+  exprsList[[i]]  <- exprs
+  phenoList[[i]] <- pheno
+  
+  ### Clean up
+  rm(exprs)
+  rm(exprs_full)
+  rm(pheno)
+  rm(pheno_full)
+  rm(keep)
+}
+
+### Save
+saveRDS(exprsList, "all_exprs.rds")
+saveRDS(phenoList, "all_pheno.rds")
+
+### Look at
+sapply(exprsList, dim)
+sapply(phenoList, dim)
+sapply(phenoList, names)
+
+### Write out names
+rbind(
+  paste("ACC:", toString(sort(names(phenoList$`TCGA-ACC`)))),
+  paste("CHOL:", toString(sort(names(phenoList$`TCGA-CHOL`)))),
+  paste("DLBC:", toString(sort(names(phenoList$`TCGA-DLBC`)))),
+  paste("KICH:", toString(sort(names(phenoList$`TCGA-KICH`)))),
+  paste("MESO:", toString(sort(names(phenoList$`TCGA-MESO`)))),
+  paste("UVM:", toString(sort(names(phenoList$`TCGA-UVM`))))
+) %>%
+  writeLines("sample_variables.txt")
+```
+
+## Pre-process data 
+
+### Load your dataset
+
+```{r load_data}
+### EDIT: You need to insert your dataset file names in the quotes below
+
+exprs <- readRDS("TCGA-DLBC_exprs.rds")
+pheno <- readRDS("TCGA-DLBC_pheno.rds")
+```
+
+
+### Pick your group (variable of interest)
+
+This should be a variable that is categorical with at least 2 categories and at least 3 samples in each category Use colnames(pheno) to find out what variable options you have. You can use one of the descriptive summary functions (from AE3) to determine how many categories there are for each group, and how many samples there are for each category.
+
+```{r select_group}
+### EDIT!! Copy your variable of interest into a new column called "group". This will help generalize/simplify your project's code
+pheno$group <- pheno$ann_arbor_b_symptoms
+```
+
+### Filter samples
+
+Check for samples with missing data for your "group"
+
+```{r filter_samples_check}
+### Don't edit
+
+### You can check this using the following (many other ways to check too)
+### Make sure no "blanks" either -- 
+### sometimes missing data isn't converted to an NA but instead is just blank
+summary(as.factor(pheno$group)) # look for blanks, no data, etc. categories
+table(is.na(pheno$group))
+```
+
+Remove samples with missing data (or no data; i.e. "not reported") for your "group". First from phenoData
+
+```{r filter_samples_remove}
+### Don't edit
+
+### Remove NAs
+pheno <- pheno[!is.na(pheno$group), ]
+
+### Remove blanks
+pheno <- pheno[!(pheno$group == ""), ]
+
+### Remove "not reported"
+pheno <- pheno[!(pheno$group == "not reported"), ]
+```
+
+And also remove them from exprsData
+
+```{r}
+### Don't edit
+
+exprs <- exprs[ , which(colnames(exprs) %in% rownames(pheno))]
+```
+
+### Filter genes with low expression
+
+Here we'll require FPKM > 5 in at least 25 samples (it will help reduce computational time)
+
+```{r filter_genes}
+### Don't edit
+
+### Filter
+exprs <- exprs[rowSums(exprs > 5) > 25, ]
+```
+
+### Finalize data
+
+Match order of samples in both pheno (rownames) and exprs (colnames) datasets
+
+```{r matrices}
+### Don't edit
+
+### Match order of samples in both matrices
+table(colnames(exprs) == rownames(pheno)) # check
+pheno <- pheno[match(colnames(exprs), rownames(pheno)), ] # fixes if needed
+table(colnames(exprs) == rownames(pheno)) # check
+```
+
+Convert expression matrix to tidy, so that we also have a tidy version of the data in case we need it.
+
+```{r tidy}
+### Don't edit
+
+### Create tibble with expression and pheno data
+tidy <- exprs %>% 
+  
+  # Convert expression matrix to tidy tibble
+  as_tibble(rownames = "gene") %>%
+  gather("sample", "fpkm", -gene)  %>%
+
+  # Add phenoData
+  inner_join(pheno, by = "sample")
+```
+
+## Team Member #4: PCA
+
+Tasks:
+  a. Generate scree plot with Kaiser cutoff line
+  b. Determine number of PCs to use, using Kaiser cutoff
+  c. Generate PCA biplots for those PCs
+  d. Perform network correlation of PCs and sample pheno data
+  e. Interpret clustering patterns and relationship of PCs and pheno data to your group of interest using the PC biplots and correlation network plot
+
+### Prepare data
+
+```{r pca_prep}
+### Log transform
+exprs_mat <- log2(exprs + 0.0001)
+
+### Transpose so that we're clustering samples (not genes)
+exprs_mat <- t(exprs_mat)
+```
+
+### Run PCA
+
+```{r pca_run}
+set.seed(1116)
+pca_obj <- prcomp(
+  exprs_mat, 
+  scale. = TRUE, 
+  center = TRUE
+)
+```
+
+### Summary
+
+```{r pca_summary}
+summary(pca_obj)
+```
+
+### Scree plot 
+
+Comment from Alexis: the Kaiser cutoff is the horizontal line at 0.1, not the total number of PCs identified. So the cutoff is at PC2 not PC46.
+
+```{r pca_scree}
+### Calculate variance explained (ve) for each PC
+ve <- pca_obj$sdev^2 
+
+### Create table (dataframe called "ve") of variance explained measures (using SD values), so we can plot them
+df_ve <- data.frame(
+  PC = as_factor(1:length(ve)),    # PC 
+  PVE = ve / sum(ve)               # proportion ve
+) 
+
+### Plot
+df_ve %>%
+  ggplot(aes(x = PC, y = PVE, fill = PC)) + 
+  geom_col(show.legend = FALSE) +
+  
+  # add kaiser criterion line
+  geom_hline(yintercept = 0.1) +
+  
+  # add plot title
+  labs(title = "Scree plot")
+```
+
+### Biplot for PC1 vs. PC2
+
+```{r pca_biplot}
+pca_obj %>% 
+  ggbiplot(
+    choices = 1:2, 
+    groups = pheno$group,
+    ellipse = TRUE,
+    var.axes = FALSE
+  ) 
+```
+
+```{r pca_biplot_names}
+pca_obj %>% 
+  ggbiplot(
+    choices = 1:2, 
+    groups = pheno$group,
+    labels = pheno$sample,
+    labels.size = 3,
+    ellipse = TRUE,
+    var.axes = FALSE
+  ) 
+```
+
+### Correlate PCs to phenoData (known sample variables)
+
+#### Run
+
+```{r pca_corr_run}
+### PC results to phenoData
+pca_obj_pheno <- pheno %>%
+  
+  # Just some phenoData variables 
+  select(
+    group, age_at_diagnosis, gender, race,
+    ann_arbor_clinical_stage, ann_arbor_b_symptoms,
+    ann_arbor_extranodal_involvement,
+    site_of_resection_or_biopsy
+  ) %>%
+  
+  # Just the first 5 PCs (so the first 5 columns)
+  # First need to convert the pca results from matrix to tibble/data.frame
+  bind_cols(as_tibble(pca_obj$x[ , 1:5]))
+
+### Convert non-numberic values (characters, factors) to numberic values
+for (i in names(pca_obj_pheno)) {
+  if(is.factor(pca_obj_pheno[[i]])) {
+    pca_obj_pheno[[i]] <- as.numeric(pca_obj_pheno[[i]])
+  }
+  if(is.character(pca_obj_pheno[[i]])) {
+    pca_obj_pheno[[i]] <- as.numeric(as.factor(pca_obj_pheno[[i]]))
+  }
+}
+
+### Run correlation
+set.seed(1116)
+pca_corr <- pca_obj_pheno %>%
+  correlate(method = "pearson") 
+```
+
+#### Barplot
+
+```{r pca_corr_plot}
+### Plot
+pca_corr %>% 
+  # "focusing" on group of interest
+  focus(group) %>%
+  
+  # "gather" (create a single column) of phenoData variables ("vars")
+  # with their pearson's correlation ("value") for each PC in second column
+  # rowname = PC#
+  gather(var, value, -rowname) %>%
+  
+  # Plot
+  ggplot(aes(rowname, value, color = var, fill = var)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs( 
+    x = NULL, # Remove 
+    y = "Pearson's correlation",
+    title = "Correlation of sample information to the first five PCs"
+  ) +
+  scale_y_continuous(limits = c(-1, 1))
+```
+
+#### Network plot
+
+```{r pca_corr_network}
+network_plot(pca_corr)
+```
+
+## Session info
+
+```{r sessioninfo}
+sessionInfo()
+```
